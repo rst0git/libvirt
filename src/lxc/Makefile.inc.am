@@ -105,6 +105,10 @@ if WITH_BLKID
 libvirt_driver_lxc_impl_la_CFLAGS += $(BLKID_CFLAGS)
 libvirt_driver_lxc_impl_la_LIBADD += $(BLKID_LIBS)
 endif WITH_BLKID
+if WITH_CRIU
+libvirt_driver_lxc_impl_la_CFLAGS += $(CRIU_CFLAGS)
+libvirt_driver_lxc_impl_la_LIBADD += $(CRIU_LIBS)
+endif WITH_CRIU
 libvirt_driver_lxc_impl_la_LIBADD += $(SECDRIVER_LIBS)
 libvirt_driver_lxc_impl_la_SOURCES = $(LXC_DRIVER_SOURCES)
 
@@ -144,6 +148,10 @@ if WITH_BLKID
 libvirt_lxc_CFLAGS += $(BLKID_CFLAGS)
 libvirt_lxc_LDADD += $(BLKID_LIBS)
 endif WITH_BLKID
+if WITH_CRIU
+libvirt_lxc_CFLAGS += $(CRIU_CFLAGS)
+libvirt_lxc_LDADD += $(CRIU_LIBS)
+endif WITH_CRIU
 libvirt_lxc_CFLAGS += $(SECDRIVER_CFLAGS)
 
 

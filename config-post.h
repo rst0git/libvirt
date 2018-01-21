@@ -31,6 +31,7 @@
 # undef HAVE_LIBSASL2
 # undef HAVE_SYS_ACL_H
 # undef WITH_CAPNG
+# undef WITH_CRIU
 # undef WITH_CURL
 # undef WITH_DBUS
 # undef WITH_DEVMAPPER
@@ -58,6 +59,7 @@
 # undef HAVE_LIBSASL2
 # undef HAVE_SYS_ACL_H
 # undef WITH_CAPNG
+# undef WITH_CRIU
 # undef WITH_CURL
 # undef WITH_DEVMAPPER
 # undef WITH_DTRACE_PROBES
