@@ -146,6 +146,8 @@ struct _virLXCController {
     virCgroupPtr cgroup;
 
     virLXCFusePtr fuse;
+
+    int restore;
 };
 
 #include "lxc_controller_dispatch.h"
@@ -1014,6 +1016,65 @@ static int lxcControllerClearCapabilities(void)
 #endif
     return 0;
 }
+
+static int
+lxcControllerFindRestoredPid(int fd)
+{
+    int initpid = 0;
+    int ret = -1;
+    char *checkpointdir = NULL;
+    char *pidfile = NULL;
+    char *checkpointfd = NULL;
+    int pidfilefd;
+    char c;
+
+    if (fd < 0)
+        goto cleanup;
+
+    if (virAsprintf(&checkpointfd, "/proc/self/fd/%d", fd) < 0) {
+            virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                           _("Failed to write checkpoint dir path"));
+            goto cleanup;
+    }
+
+    if (virFileResolveLink(checkpointfd, &checkpointdir) < 0) {
+        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                       _("Failed to readlink checkpoint dir path"));
+        goto cleanup;
+    }
+
+    if (virAsprintf(&pidfile, "%s/pidfile", checkpointdir) < 0) {
+            virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                                           _("Failed to write pidfile path"));
+        goto cleanup;
+    }
+
+    if ((pidfilefd = virFileOpenAs(pidfile, O_RDONLY, 0, -1, -1, 0)) < 0) {
+        virReportSystemError(pidfilefd,
+                             _("Failed to open domain's pidfile '%s'"),
+                             pidfile);
+        goto cleanup;
+    }
+
+    while ((saferead(pidfilefd,  &c, 1) == 1) &&  c != EOF)
+        initpid = initpid*10 + c - '0';
+
+    ret = initpid;
+
+    if (virFileRemove(pidfile, -1, -1) < 0) {
+        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                       _("Failed to delete pidfile path"));
+    }
+
+ cleanup:
+    VIR_FORCE_CLOSE(fd);
+    VIR_FORCE_CLOSE(pidfilefd);
+    VIR_FREE(pidfile);
+    VIR_FREE(checkpointdir);
+    VIR_FREE(checkpointfd);
+    return ret;
+}
+
 
 static bool wantReboot;
 static virMutex lock = VIR_MUTEX_INITIALIZER;
@@ -2327,6 +2388,7 @@ virLXCControllerRun(virLXCControllerPtr ctrl)
     int containerhandshake[2] = { -1, -1 };
     char **containerTTYPaths = NULL;
     size_t i;
+    bool restore_mode = (ctrl->restore != -1);
 
     if (VIR_ALLOC_N(containerTTYPaths, ctrl->nconsoles) < 0)
         goto cleanup;
@@ -2383,7 +2445,8 @@ virLXCControllerRun(virLXCControllerPtr ctrl)
                                            containerhandshake[1],
                                            ctrl->nsFDs,
                                            ctrl->nconsoles,
-                                           containerTTYPaths)) < 0)
+                                           containerTTYPaths,
+                                           ctrl->restore)) < 0)
         goto cleanup;
     VIR_FORCE_CLOSE(control[1]);
     VIR_FORCE_CLOSE(containerhandshake[1]);
@@ -2395,10 +2458,10 @@ virLXCControllerRun(virLXCControllerPtr ctrl)
         for (i = 0; i < VIR_LXC_DOMAIN_NAMESPACE_LAST; i++)
             VIR_FORCE_CLOSE(ctrl->nsFDs[i]);
 
-    if (virLXCControllerSetupCgroupLimits(ctrl) < 0)
+    if (!restore_mode && virLXCControllerSetupCgroupLimits(ctrl) < 0)
         goto cleanup;
 
-    if (virLXCControllerSetupUserns(ctrl) < 0)
+    if (!restore_mode && virLXCControllerSetupUserns(ctrl) < 0)
         goto cleanup;
 
     if (virLXCControllerMoveInterfaces(ctrl) < 0)
@@ -2422,6 +2485,26 @@ virLXCControllerRun(virLXCControllerPtr ctrl)
     /* ...and reduce our privileges */
     if (lxcControllerClearCapabilities() < 0)
         goto cleanup;
+
+    if (restore_mode) {
+        int status;
+        int ret = waitpid(-1, &status, 0);
+        VIR_DEBUG("Got sig child %d", ret);
+
+        /* There could be two cases here:
+         * 1. CRIU died bacause of restore error and the container is not running
+         * 2. CRIU detached itself from the running container
+         */
+        int initpid;
+        if ((initpid = lxcControllerFindRestoredPid(ctrl->restore)) < 0) {
+            virReportSystemError(errno, "%s",
+                                 _("Unable to get restored task pid"));
+            virNetDaemonQuit(ctrl->daemon);
+            goto cleanup;
+        }
+
+        ctrl->initpid = initpid;
+    }
 
     for (i = 0; i < ctrl->nconsoles; i++)
         if (virLXCControllerConsoleSetNonblocking(&(ctrl->consoles[i])) < 0)
@@ -2466,6 +2549,7 @@ int main(int argc, char *argv[])
     int ns_fd[VIR_LXC_DOMAIN_NAMESPACE_LAST];
     int handshakeFd = -1;
     bool bg = false;
+    int restore = -1;
     const struct option options[] = {
         { "background", 0, NULL, 'b' },
         { "name",   1, NULL, 'n' },
@@ -2477,6 +2561,7 @@ int main(int argc, char *argv[])
         { "share-net", 1, NULL, 'N' },
         { "share-ipc", 1, NULL, 'I' },
         { "share-uts", 1, NULL, 'U' },
+        { "restore", 1, NULL, 'r' },
         { "help", 0, NULL, 'h' },
         { 0, 0, 0, 0 },
     };
@@ -2504,7 +2589,7 @@ int main(int argc, char *argv[])
     while (1) {
         int c;
 
-        c = getopt_long(argc, argv, "dn:v:p:m:c:s:h:S:N:I:U:",
+        c = getopt_long(argc, argv, "dn:v:p:m:c:s:h:S:N:I:U:r:",
                         options, NULL);
 
         if (c == -1)
@@ -2580,6 +2665,14 @@ int main(int argc, char *argv[])
             securityDriver = optarg;
             break;
 
+        case 'r':
+             if (virStrToLong_i(optarg, NULL, 10, &restore) < 0) {
+                fprintf(stderr, "malformed --restore argument '%s'",
+                        optarg);
+                goto cleanup;
+            }
+            break;
+
         case 'h':
         case '?':
             fprintf(stderr, "\n");
@@ -2596,6 +2689,7 @@ int main(int argc, char *argv[])
             fprintf(stderr, "  -N FD, --share-net FD\n");
             fprintf(stderr, "  -I FD, --share-ipc FD\n");
             fprintf(stderr, "  -U FD, --share-uts FD\n");
+            fprintf(stderr, "  -r FD, --restore FD\n");
             fprintf(stderr, "  -h, --help\n");
             fprintf(stderr, "\n");
             rc = 0;
@@ -2647,6 +2741,8 @@ int main(int argc, char *argv[])
 
     ctrl->passFDs = passFDs;
     ctrl->npassFDs = npassFDs;
+
+    ctrl->restore = restore;
 
     for (i = 0; i < VIR_LXC_DOMAIN_NAMESPACE_LAST; i++) {
         if (ns_fd[i] != -1) {

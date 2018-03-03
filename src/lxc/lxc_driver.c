@@ -1120,7 +1120,7 @@ static int lxcDomainCreateWithFiles(virDomainPtr dom,
 
     ret = virLXCProcessStart(dom->conn, driver, vm,
                              nfiles, files,
-                             (flags & VIR_DOMAIN_START_AUTODESTROY),
+                             (flags & VIR_DOMAIN_START_AUTODESTROY), -1,
                              VIR_DOMAIN_RUNNING_BOOTED);
 
     if (ret == 0) {
@@ -1247,7 +1247,7 @@ lxcDomainCreateXMLWithFiles(virConnectPtr conn,
 
     if (virLXCProcessStart(conn, driver, vm,
                            nfiles, files,
-                           (flags & VIR_DOMAIN_START_AUTODESTROY),
+                           (flags & VIR_DOMAIN_START_AUTODESTROY), -1,
                            VIR_DOMAIN_RUNNING_BOOTED) < 0) {
         virDomainAuditStart(vm, "booted", false);
         virLXCDomainObjEndJob(driver, vm);
