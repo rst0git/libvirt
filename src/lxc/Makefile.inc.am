@@ -42,6 +42,8 @@ LXC_DRIVER_SOURCES = \
 	lxc/lxc_native.h \
 	lxc/lxc_driver.c \
 	lxc/lxc_driver.h \
+	lxc/lxc_criu.c \
+	lxc/lxc_criu.h \
 	$(NULL)
 
 LXC_CONTROLLER_SOURCES = \
@@ -58,6 +60,8 @@ LXC_CONTROLLER_SOURCES = \
 	lxc/lxc_fuse.c \
 	lxc/lxc_fuse.h \
 	lxc/lxc_controller.c \
+	lxc/lxc_criu.c \
+	lxc/lxc_criu.h \
 	$(NULL)
 
 
