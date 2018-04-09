@@ -26,6 +26,7 @@
 
 #include "driver.h"
 #include "viralloc.h"
+#include "virportallocator.h"
 #include "virfile.h"
 #include "virlog.h"
 #include "virthread.h"

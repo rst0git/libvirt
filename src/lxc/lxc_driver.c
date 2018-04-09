@@ -44,6 +44,7 @@
 #include <wait.h>
 
 #include "virerror.h"
+#include "virportallocator.h"
 #include "virlog.h"
 #include "datatypes.h"
 #include "lxc_cgroup.h"
@@ -52,6 +53,7 @@
 #include "lxc_domain.h"
 #include "lxc_driver.h"
 #include "lxc_native.h"
+#include "lxc_migration.h"
 #include "lxc_process.h"
 #include "viralloc.h"
 #include "virnetdevbridge.h"
@@ -1632,6 +1634,13 @@ static int lxcStateInitialize(bool privileged,
         return -1;
     }
 
+    /* Allocate bitmap for migration port reservation */
+    if (!(lxc_driver->migrationPorts =
+          virPortAllocatorRangeNew(_("migration"),
+                              LXC_MIGRATION_PORT_MIN,
+                              LXC_MIGRATION_PORT_MAX)))
+        goto cleanup;
+
     if (!(lxc_driver->domains = virDomainObjListNew()))
         goto cleanup;
 
@@ -1779,6 +1788,7 @@ static int lxcStateCleanup(void)
     virObjectUnref(lxc_driver->securityManager);
     virObjectUnref(lxc_driver->xmlopt);
     virObjectUnref(lxc_driver->config);
+    virObjectUnref(lxc_driver->migrationPorts);
     virMutexDestroy(&lxc_driver->lock);
     VIR_FREE(lxc_driver);
 
@@ -1793,13 +1803,13 @@ lxcConnectSupportsFeature(virConnectPtr conn, int feature)
 
     switch ((virDrvFeature) feature) {
     case VIR_DRV_FEATURE_TYPED_PARAM_STRING:
+    case VIR_DRV_FEATURE_MIGRATION_PARAMS:
         return 1;
     case VIR_DRV_FEATURE_FD_PASSING:
     case VIR_DRV_FEATURE_MIGRATE_CHANGE_PROTECTION:
     case VIR_DRV_FEATURE_MIGRATION_DIRECT:
     case VIR_DRV_FEATURE_MIGRATION_OFFLINE:
     case VIR_DRV_FEATURE_MIGRATION_P2P:
-    case VIR_DRV_FEATURE_MIGRATION_PARAMS:
     case VIR_DRV_FEATURE_MIGRATION_V1:
     case VIR_DRV_FEATURE_MIGRATION_V2:
     case VIR_DRV_FEATURE_MIGRATION_V3:
@@ -5756,6 +5766,219 @@ lxcDomainHasManagedSaveImage(virDomainPtr dom, unsigned int flags)
 }
 
 
+static char *
+lxcDomainMigrateBegin3Params(virDomainPtr domain,
+                             virTypedParameterPtr params,
+                             int nparams,
+                             char **cookieout ATTRIBUTE_UNUSED,
+                             int *cookieoutlen ATTRIBUTE_UNUSED,
+                             unsigned int flags)
+{
+    const char *xmlin = NULL;
+    virDomainObjPtr vm = NULL;
+
+    virCheckFlags(LXC_MIGRATION_FLAGS, NULL);
+    if (virTypedParamsValidate(params, nparams, LXC_MIGRATION_PARAMETERS) < 0)
+        return NULL;
+
+    if (virTypedParamsGetString(params, nparams,
+                                VIR_MIGRATE_PARAM_DEST_XML,
+                                &xmlin) < 0)
+        return NULL;
+
+    if (!(vm = lxcDomObjFromDomain(domain)))
+        return NULL;
+
+    if (virDomainMigrateBegin3ParamsEnsureACL(domain->conn, vm->def) < 0) {
+        virDomainObjEndAPI(&vm);
+        return NULL;
+    }
+
+    if (!virDomainObjIsActive(vm)) {
+        virReportError(VIR_ERR_OPERATION_INVALID,
+                       "%s", _("domain is not running"));
+        virDomainObjEndAPI(&vm);
+        return NULL;
+    }
+    return lxcDomainMigrationBegin(domain->conn, vm, xmlin);
+}
+
+
+static int
+lxcDomainMigratePrepare3Params(virConnectPtr dconn,
+                               virTypedParameterPtr params,
+                               int nparams,
+                               const char *cookiein ATTRIBUTE_UNUSED,
+                               int cookieinlen ATTRIBUTE_UNUSED,
+                               char **cookieout ATTRIBUTE_UNUSED,
+                               int *cookieoutlen ATTRIBUTE_UNUSED,
+                               char **uri_out,
+                               unsigned int flags)
+{
+    virLXCDriverPtr driver = dconn->privateData;
+    virDomainDefPtr def = NULL;
+    const char *dom_xml = NULL;
+    const char *dname = NULL;
+    const char *uri_in = NULL;
+
+    virCheckFlags(LXC_MIGRATION_FLAGS, -1);
+    if (virTypedParamsValidate(params, nparams, LXC_MIGRATION_PARAMETERS) < 0)
+        goto cleanup;
+
+    if (virTypedParamsGetString(params, nparams,
+                                VIR_MIGRATE_PARAM_DEST_XML,
+                                &dom_xml) < 0 ||
+        virTypedParamsGetString(params, nparams,
+                                VIR_MIGRATE_PARAM_DEST_NAME,
+                                &dname) < 0 ||
+        virTypedParamsGetString(params, nparams,
+                                VIR_MIGRATE_PARAM_URI,
+                                &uri_in) < 0)
+        goto cleanup;
+
+    if (!(def = lxcDomainMigrationPrepareDef(driver, dom_xml, dname)))
+        goto cleanup;
+
+    if (virDomainMigratePrepare3ParamsEnsureACL(dconn, def) < 0)
+        goto cleanup;
+
+    if (lxcDomainMigrationPrepare(dconn, def, uri_in, uri_out, flags) < 0)
+        goto cleanup;
+
+    return 0;
+
+ cleanup:
+    virDomainDefFree(def);
+    return -1;
+}
+
+
+static int
+lxcDomainMigratePerform3Params(virDomainPtr dom,
+                               const char *dconnuri,
+                               virTypedParameterPtr params,
+                               int nparams,
+                               const char *cookiein ATTRIBUTE_UNUSED,
+                               int cookieinlen ATTRIBUTE_UNUSED,
+                               char **cookieout ATTRIBUTE_UNUSED,
+                               int *cookieoutlen ATTRIBUTE_UNUSED,
+                               unsigned int flags)
+{
+    virLXCDriverPtr driver = dom->conn->privateData;
+    virDomainObjPtr vm = NULL;
+    const char *dom_xml = NULL;
+    const char *dname = NULL;
+    const char *uri = NULL;
+    int ret = -1;
+
+    virCheckFlags(LXC_MIGRATION_FLAGS, -1);
+    if (virTypedParamsValidate(params, nparams, LXC_MIGRATION_PARAMETERS) < 0)
+        goto cleanup;
+
+    if (virTypedParamsGetString(params, nparams,
+                                VIR_MIGRATE_PARAM_DEST_XML,
+                                &dom_xml) < 0 ||
+        virTypedParamsGetString(params, nparams,
+                                VIR_MIGRATE_PARAM_DEST_NAME,
+                                &dname) < 0 ||
+        virTypedParamsGetString(params, nparams,
+                                VIR_MIGRATE_PARAM_URI,
+                                &uri) < 0)
+
+        goto cleanup;
+
+    if (!(vm = lxcDomObjFromDomain(dom)))
+        goto cleanup;
+
+    if (virDomainMigratePerform3ParamsEnsureACL(dom->conn, vm->def) < 0)
+        goto cleanup;
+
+    if (lxcDomainMigrationPerform(driver, vm, dom_xml, dconnuri,
+                                    uri, dname, flags) < 0) {
+        /* Job terminated and vm unlocked if MigrationPerform failed */
+        vm = NULL;
+        goto cleanup;
+    }
+
+    ret = 0;
+
+ cleanup:
+    virDomainObjEndAPI(&vm);
+    return ret;
+}
+
+
+static virDomainPtr
+lxcDomainMigrateFinish3Params(virConnectPtr dconn,
+                              virTypedParameterPtr params,
+                              int nparams,
+                              const char *cookiein ATTRIBUTE_UNUSED,
+                              int cookieinlen ATTRIBUTE_UNUSED,
+                              char **cookieout ATTRIBUTE_UNUSED,
+                              int *cookieoutlen ATTRIBUTE_UNUSED,
+                              unsigned int flags,
+                              int cancelled)
+{
+    virLXCDriverPtr driver = dconn->privateData;
+    virDomainObjPtr vm = NULL;
+    const char *dname = NULL;
+
+    virCheckFlags(LXC_MIGRATION_FLAGS, NULL);
+    if (virTypedParamsValidate(params, nparams, LXC_MIGRATION_PARAMETERS) < 0)
+        return NULL;
+
+    if (virTypedParamsGetString(params, nparams,
+                                VIR_MIGRATE_PARAM_DEST_NAME,
+                                &dname) < 0)
+        return NULL;
+
+    if (!dname ||
+        !(vm = virDomainObjListFindByName(driver->domains, dname))) {
+        /* Migration obviously failed if the domain doesn't exist */
+        virReportError(VIR_ERR_OPERATION_FAILED,
+                       _("Migration failed. No domain on destination host "
+                         "with matching name '%s'"),
+                       NULLSTR(dname));
+        return NULL;
+    }
+
+    if (virDomainMigrateFinish3ParamsEnsureACL(dconn, vm->def) < 0) {
+        virDomainObjEndAPI(&vm);
+        return NULL;
+    }
+
+    return lxcDomainMigrationFinish(dconn, vm, flags, cancelled);
+}
+
+
+static int
+lxcDomainMigrateConfirm3Params(virDomainPtr domain,
+                               virTypedParameterPtr params,
+                               int nparams,
+                               const char *cookiein ATTRIBUTE_UNUSED,
+                               int cookieinlen ATTRIBUTE_UNUSED,
+                               unsigned int flags,
+                               int cancelled)
+{
+    virLXCDriverPtr driver = domain->conn->privateData;
+    virDomainObjPtr vm = NULL;
+
+    virCheckFlags(LXC_MIGRATION_FLAGS, -1);
+    if (virTypedParamsValidate(params, nparams, LXC_MIGRATION_PARAMETERS) < 0)
+        return -1;
+
+    if (!(vm = lxcDomObjFromDomain(domain)))
+        return -1;
+
+    if (virDomainMigrateConfirm3ParamsEnsureACL(domain->conn, vm->def) < 0) {
+        virObjectUnlock(vm);
+        return -1;
+    }
+
+    return lxcDomainMigrationConfirm(driver, vm, flags, cancelled);
+}
+
+
 /* Function Tables */
 static virHypervisorDriver lxcHypervisorDriver = {
     .name = LXC_DRIVER_NAME,
@@ -5854,6 +6077,11 @@ static virHypervisorDriver lxcHypervisorDriver = {
     .nodeGetFreePages = lxcNodeGetFreePages, /* 1.2.6 */
     .nodeAllocPages = lxcNodeAllocPages, /* 1.2.9 */
     .domainHasManagedSaveImage = lxcDomainHasManagedSaveImage, /* 1.2.13 */
+    .domainMigrateBegin3Params = lxcDomainMigrateBegin3Params, /* x.x.x */
+    .domainMigratePrepare3Params = lxcDomainMigratePrepare3Params, /* x.x.x */
+    .domainMigratePerform3Params = lxcDomainMigratePerform3Params, /* x.x.x */
+    .domainMigrateFinish3Params = lxcDomainMigrateFinish3Params, /* x.x.x */
+    .domainMigrateConfirm3Params = lxcDomainMigrateConfirm3Params /* x.x.x */
 };
 
 static virConnectDriver lxcConnectDriver = {

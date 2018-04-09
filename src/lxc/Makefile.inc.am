@@ -34,6 +34,8 @@ LXC_DRIVER_SOURCES = \
 	lxc/lxc_hostdev.h \
 	lxc/lxc_monitor.c \
 	lxc/lxc_monitor.h \
+	lxc/lxc_migration.c \
+	lxc/lxc_migration.h \
 	lxc/lxc_process.c \
 	lxc/lxc_process.h \
 	lxc/lxc_fuse.c \

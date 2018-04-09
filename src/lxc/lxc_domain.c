@@ -24,6 +24,7 @@
 #include "lxc_domain.h"
 
 #include "viralloc.h"
+#include "virportallocator.h"
 #include "virlog.h"
 #include "virerror.h"
 #include <libxml/xpathInternals.h>

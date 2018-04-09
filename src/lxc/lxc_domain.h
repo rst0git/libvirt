@@ -88,6 +88,7 @@ struct _virLXCDomainObjPrivate {
 
     virCgroupPtr cgroup;
     char *machineName;
+    unsigned short migrationPort;
 
     struct virLXCDomainJobObj job;
 };

@@ -104,6 +104,7 @@ src/lxc/lxc_domain.c
 src/lxc/lxc_driver.c
 src/lxc/lxc_fuse.c
 src/lxc/lxc_hostdev.c
+src/lxc/lxc_migration.c
 src/lxc/lxc_native.c
 src/lxc/lxc_process.c
 src/lxc/lxc_criu.c
